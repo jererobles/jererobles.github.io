@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Habbo Origins — DirPlayer M2 live-login test</title>
+<style>
+  body { margin:0; background:#111; color:#eee; font-family:monospace; }
+  #hud { padding:6px 10px; font-size:12px; }
+  #stagewrap { width:960px; height:540px; margin:10px; background:#000; }
+</style>
+</head>
+<body>
+<div id="hud">M2: official server via local ws&rarr;TCP bridge (127.0.0.1:40001/40002)</div>
+<div id="stagewrap">
+  <embed
+    src="habbo.dcr"
+    type="application/x-director"
+    width="960" height="540"
+    sw2="connection.info.host=game-ous.habbo.com;connection.info.port=40001"
+    sw3="connection.mus.host=game-ous.habbo.com;connection.mus.port=40002"
+    sw4="site.url=http://localhost:8000/;url.prefix=http://localhost:8000/"
+    sw5="client.reload.url=http://localhost:8000/;client.fatal.error.url=http://localhost:8000/"
+    sw6="/gamedata/external_variables.txt"
+    sw7="/gamedata/external_texts.txt"
+  />
+</div>
+<!-- Production: route the Multiuser xtra's official endpoints through the
+     same-origin ws->TCP bridge. socket-proxy.js derives ws(s)://<page-host>/ws/info
+     and /ws/mus from location at runtime; the polyfill installs
+     window.dirplayerResolveSocketUrl which reads this config on every call.
+     site-urls.js rewrites the embed's sw4/sw5 site/reload URLs to the page
+     origin (https stays https) before the polyfill reads them. -->
+<script src="/config.js"></script>
+<script src="/socket-proxy.js"></script>
+<script src="/site-urls.js"></script>
+<script src="/dirplayer-polyfill.js"></script>
+</body>
+</html>
