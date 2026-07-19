@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--
+  ios.html — iOS Safari shell around the DirPlayer Habbo Origins client.
+  The player boot block (embed + sw params + socketProxy + polyfill tag) is a
+  VERBATIM mirror of index_m2.html — do not change connection params here
+  without changing index_m2.html too (owned by the connectivity engineer).
+  The shell owns: viewport/chrome, stage scaling, the iOS chat-keyboard
+  bridge, wake lock, audio unlock, boot progress overlay, net status dot.
+-->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Habbo Origins">
+<meta name="theme-color" content="#0e1116">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Habbo Hotel: Origins — Web Port</title>
+<style>
+  /* Self-sufficient styles: the polyfill injects a global CSS reset
+     (the-new-css-reset) into the page, so nothing here may rely on UA
+     defaults. Palette: dark neutral, low-saturation, no gradients. */
+  :root {
+    --bg: #0e1116;
+    --panel: rgba(17, 20, 26, 0.86);
+    --panel-solid: #11141a;
+    --edge: rgba(255, 255, 255, 0.09);
+    --edge-strong: rgba(255, 255, 255, 0.16);
+    --text: #c7ccd4;
+    --text-dim: #7d8590;
+    --accent: #579ed6;
+    --ok: #3fae6a;
+    --warn: #d8a23c;
+    --err: #d15656;
+    --safe-t: env(safe-area-inset-top, 0px);
+    --safe-b: env(safe-area-inset-bottom, 0px);
+    --safe-l: env(safe-area-inset-left, 0px);
+    --safe-r: env(safe-area-inset-right, 0px);
+    --topbar-h: calc(38px + var(--safe-t));
+  }
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  body {
+    position: fixed;
+    inset: 0;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* ---------- top bar ---------- */
+  #topbar {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: var(--topbar-h);
+    padding: var(--safe-t) calc(10px + var(--safe-r)) 0 calc(12px + var(--safe-l));
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--edge);
+    z-index: 40;
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    touch-action: manipulation;
+  }
+  #netdot {
+    flex: 0 0 auto;
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: var(--warn);
+    box-shadow: 0 0 0 3px rgba(216, 162, 60, 0.14);
+    transition: background 0.25s ease, box-shadow 0.25s ease;
+  }
+  #netdot.ok    { background: var(--ok);   box-shadow: 0 0 0 3px rgba(63, 174, 106, 0.16); }
+  #netdot.warn  { background: var(--warn); box-shadow: 0 0 0 3px rgba(216, 162, 60, 0.14); }
+  #netdot.err   { background: var(--err);  box-shadow: 0 0 0 3px rgba(209, 86, 86, 0.16); }
+  #netdot.pulse { animation: netpulse 1.1s ease-in-out infinite; }
+  @keyframes netpulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  #title {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #title .sub { color: var(--text-dim); font-weight: 400; }
+  .tbtn {
+    flex: 0 0 auto;
+    height: 30px;
+    min-width: 34px;
+    padding: 0 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--edge-strong);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .tbtn:active { background: rgba(255, 255, 255, 0.12); }
+  .tbtn.on { border-color: var(--accent); color: var(--accent); }
+  .tbtn svg { display: block; }
+
+  /* ---------- stage ---------- */
+  #stage-viewport {
+    position: fixed;
+    inset: 0;             /* full window: frame translate coords == client coords */
+    overflow: hidden;
+    z-index: 1;
+    touch-action: none;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #stage-frame {
+    position: absolute;
+    top: 0; left: 0;
+    width: 960px; height: 540px;   /* logical Director stage (mirror of index_m2) */
+    transform-origin: 0 0;
+    background: #000;
+    will-change: transform;
+  }
+  #embed-host { width: 960px; height: 540px; }
+  /* iOS zooms on focus when an input's font is <16px — the polyfill's own
+     hidden field-input has no explicit font-size; force it here. */
+  #stage-frame input,
+  #kb-input { font-size: 16px !important; }
+
+  /* hidden-but-focusable chat input (iOS only raises the keyboard for a real
+     focused text field). Rendered, onscreen, nearly invisible, never in the
+     way of stage touches. */
+  #kb-input {
+    position: absolute;
+    left: 50%;
+    bottom: calc(6px + var(--safe-b));
+    width: 26px; height: 26px;
+    margin-left: -13px;
+    opacity: 0.02;
+    pointer-events: none;
+    background: transparent;
+    border: 0;
+    outline: none;
+    color: #fff;
+    caret-color: transparent;
+    z-index: 5;
+  }
+
+  /* ---------- floating keyboard button ---------- */
+  #kb-fab {
+    position: fixed;
+    right: calc(12px + var(--safe-r));
+    bottom: calc(12px + var(--safe-b));
+    width: 48px; height: 48px;
+    border-radius: 13px;
+    background: var(--panel);
+    border: 1px solid var(--edge-strong);
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 45;
+    cursor: pointer;
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    touch-action: manipulation;
+    transition: border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+  }
+  #kb-fab:active { transform: scale(0.94); }
+  #kb-fab.on { border-color: var(--accent); color: var(--accent); }
+
+  /* ---------- rotate hint (portrait only, non-blocking) ---------- */
+  #rotate-hint {
+    position: fixed;
+    top: calc(var(--topbar-h) + 12px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 8px 14px;
+    display: none;
+    align-items: center;
+    gap: 8px;
+    background: var(--panel);
+    border: 1px solid var(--edge-strong);
+    border-radius: 999px;
+    color: var(--text);
+    font-size: 12px;
+    letter-spacing: 0.01em;
+    z-index: 30;
+    pointer-events: none;
+    white-space: nowrap;
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+  }
+  @media (orientation: portrait) { #rotate-hint { display: inline-flex; } }
+  body.kbd-open #rotate-hint { display: none; }
+
+  /* ---------- toast ---------- */
+  #toast {
+    position: fixed;
+    left: 50%;
+    bottom: calc(76px + var(--safe-b));
+    transform: translateX(-50%) translateY(8px);
+    padding: 9px 16px;
+    background: var(--panel-solid);
+    border: 1px solid var(--edge-strong);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 12.5px;
+    z-index: 60;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    max-width: 78vw;
+    text-align: center;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ---------- boot overlay ---------- */
+  #boot-overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    padding: 24px;
+    transition: opacity 0.55s ease;
+  }
+  #boot-overlay.done { opacity: 0; pointer-events: none; }
+  #boot-logo {
+    width: 84px; height: 84px;
+    border-radius: 20px;
+    margin-bottom: 22px;
+    image-rendering: pixelated;
+  }
+  #boot-title {
+    font-size: 21px;
+    font-weight: 700;
+    letter-spacing: 0.24em;
+    color: #e8ecf1;
+    margin-bottom: 6px;
+    text-indent: 0.24em; /* balances letter-spacing on the right */
+  }
+  #boot-sub {
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 34px;
+    text-indent: 0.14em;
+  }
+  #boot-bar {
+    width: min(280px, 68vw);
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.09);
+    overflow: hidden;
+    margin-bottom: 14px;
+  }
+  #boot-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.35s ease;
+  }
+  #boot-status {
+    font-size: 12px;
+    color: var(--text-dim);
+    min-height: 16px;
+    letter-spacing: 0.02em;
+  }
+  #boot-note {
+    position: absolute;
+    bottom: calc(18px + var(--safe-b));
+    left: 0; right: 0;
+    text-align: center;
+    font-size: 11px;
+    color: rgba(125, 133, 144, 0.75);
+    letter-spacing: 0.02em;
+    padding: 0 24px;
+  }
+  #boot-note a { color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<!-- Early shell hooks: must run BEFORE dirplayer-polyfill.js so the console
+     tap sees every boot log line and the WebSocket observer wraps the native
+     class before the Multiuser xtra constructs one. -->
+<script>
+(function () {
+  'use strict';
+
+  // ---- shell config (overridable before load via window.__habboIosShell) ----
+  var cfg = Object.assign({
+    keepKeyboardOnEnter: false,  // mission default: Enter dismisses the keyboard
+    expectedCastCount: 58,       // ~60 cast.entry.* casts fetched during boot
+    debug: true                  // expose window.__habboIosDebug
+  }, window.__habboIosShell || {});
+  window.__habboIosShell = cfg;
+
+  var debug = {
+    keys: [],          // every key event forwarded to the VM {t,type,key,code,via}
+    bootLog: [],       // progress-relevant console markers
+    netLog: []
+  };
+  window.__habboIosDebug = debug;
+  function dbg(list, entry, cap) {
+    if (!cfg.debug) return;
+    list.push(entry);
+    if (list.length > (cap || 200)) list.splice(0, list.length - (cap || 200));
+  }
+
+  // ---- console tap (boot progress driver) ----------------------------------
+  // Transparently wraps console.*; original output always passes through.
+  var bootWatchers = [];
+  window.__habboBoot = {
+    onLine: function (fn) { bootWatchers.push(fn); },   // fn(text, level)
+    lastLineAt: Date.now()
+  };
+  ['log', 'info', 'warn', 'error', 'debug'].forEach(function (level) {
+    var orig = console[level] && console[level].bind(console);
+    if (!orig) return;
+    console[level] = function () {
+      try {
+        var text = Array.prototype.map.call(arguments, function (a) {
+          try { return typeof a === 'string' ? a : String(a); } catch (e) { return ''; }
+        }).join(' ');
+        window.__habboBoot.lastLineAt = Date.now();
+        for (var i = 0; i < bootWatchers.length; i++) {
+          try { bootWatchers[i](text, level); } catch (e) { /* watcher bugs never break logging */ }
+        }
+      } catch (e) { /* never disturb the console */ }
+      return orig.apply(null, arguments);
+    };
+  });
+
+  // ---- passive WebSocket observer (drives the connection status dot) -------
+  // Read-only: forwards construction/prototype untouched, only listens.
+  // Connection PARAMS live below in the index_m2 mirror block — not here.
+  var net = { state: 'idle', url: null, at: Date.now() }; // idle|connecting|online|offline|error
+  window.__habboNet = net;
+  function setNet(state, url) {
+    net.state = state;
+    if (url) net.url = url;
+    net.at = Date.now();
+    dbg(debug.netLog, { t: net.at, state: state, url: url || null }, 60);
+    try { window.dispatchEvent(new CustomEvent('habbo:netstate', { detail: { state: state, url: net.url } })); } catch (e) {}
+  }
+  window.__habboSetNet = setNet; // connectivity engineer may drive the dot directly
+  var NativeWS = window.WebSocket;
+  if (NativeWS) {
+    var ObservedWS = function (url, protocols) {
+      var ws = (protocols !== undefined) ? new NativeWS(url, protocols) : new NativeWS(url);
+      setNet('connecting', String(url));
+      ws.addEventListener('open', function () { setNet('online', String(url)); });
+      ws.addEventListener('error', function () { setNet('error', String(url)); });
+      ws.addEventListener('close', function () { setNet('offline', String(url)); });
+      return ws;
+    };
+    ObservedWS.prototype = NativeWS.prototype;
+    ObservedWS.CONNECTING = NativeWS.CONNECTING;
+    ObservedWS.OPEN = NativeWS.OPEN;
+    ObservedWS.CLOSING = NativeWS.CLOSING;
+    ObservedWS.CLOSED = NativeWS.CLOSED;
+    window.WebSocket = ObservedWS;
+  }
+
+  // ---- DirPlayer key injection ---------------------------------------------
+  // window.__vm is the live wasm module, exposed by the polyfill's VMProvider
+  // ("Dev convenience" in VMProvider.tsx). key_down/key_up are the exact
+  // exports the polyfill's own Stage UI calls (vm-rust/src/lib.rs).
+  var KEYCODES = {
+    Enter: 13, Backspace: 8, Tab: 9, Escape: 27, Delete: 46,
+    ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40,
+    Home: 36, End: 35, PageUp: 33, PageDown: 34, ' ': 32,
+    Shift: 16, Control: 17, Alt: 18, AltGraph: 18, Meta: 91, CapsLock: 20
+  };
+  function codeFor(key, domCode) {
+    if (domCode) return domCode;
+    if (key && key.length === 1) return key.toUpperCase().charCodeAt(0);
+    return KEYCODES[key] || 0;
+  }
+  var vmWarned = false;
+  window.__habboKey = function (type, key, code, via) {
+    var vm = window.__vm;
+    if (!vm || typeof vm.key_down !== 'function') {
+      if (!vmWarned) { vmWarned = true; try { console.warn('[ios-shell] VM not ready for key injection'); } catch (e) {} }
+      return false;
+    }
+    code = codeFor(key, code);
+    try {
+      if (type === 'down') vm.key_down(key, code);
+      else vm.key_up(key, code);
+      dbg(debug.keys, { t: Date.now(), type: type, key: key, code: code, via: via || 'api' });
+      return true;
+    } catch (e) {
+      try { console.warn('[ios-shell] key injection failed', e); } catch (e2) {}
+      return false;
+    }
+  };
+  window.__habboKeyCodeFor = codeFor;
+})();
+</script>
+
+<div id="topbar">
+  <span id="netdot" class="warn" title="Connection status"></span>
+  <div id="title">Habbo Hotel: Origins <span class="sub">— Web Port</span></div>
+  <button id="kb-top" class="tbtn" type="button" aria-label="Toggle keyboard" title="Keyboard">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="6" width="20" height="12" rx="2"/>
+      <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6"/>
+    </svg>
+  </button>
+  <button id="fs-btn" class="tbtn" type="button" aria-label="Fullscreen" title="Fullscreen">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/>
+    </svg>
+  </button>
+</div>
+
+<div id="stage-viewport">
+  <div id="stage-frame">
+    <div id="embed-host">
+      <!-- PLAYER BOOT BLOCK — VERBATIM MIRROR OF index_m2.html (do not edit
+           connection params here; the connectivity engineer owns them) -->
+      <embed
+        src="habbo.dcr"
+        type="application/x-director"
+        width="960" height="540"
+        sw2="connection.info.host=game-ous.habbo.com;connection.info.port=40001"
+        sw3="connection.mus.host=game-ous.habbo.com;connection.mus.port=40002"
+        sw4="site.url=http://localhost:8000/;url.prefix=http://localhost:8000/"
+        sw5="client.reload.url=http://localhost:8000/;client.fatal.error.url=http://localhost:8000/"
+        sw6="/gamedata/external_variables.txt"
+        sw7="/gamedata/external_texts.txt"
+      />
+      <!-- /PLAYER BOOT BLOCK -->
+    </div>
+  </div>
+  <input id="kb-input" type="text" inputmode="text"
+         autocomplete="off" autocorrect="off" autocapitalize="off"
+         spellcheck="false" aria-label="Chat keyboard input">
+</div>
+
+<button id="kb-fab" type="button" aria-label="Toggle keyboard" title="Keyboard">
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="2" y="6" width="20" height="12" rx="2"/>
+    <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6"/>
+  </svg>
+</button>
+
+<div id="rotate-hint">
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>
+  </svg>
+  <span>Rotate your device for the best experience</span>
+</div>
+
+<div id="toast"></div>
+
+<div id="boot-overlay">
+  <img id="boot-logo" src="icon-512.png" alt="">
+  <div id="boot-title">HABBO</div>
+  <div id="boot-sub">Hotel: Origins — Web Port</div>
+  <div id="boot-bar"><div id="boot-fill"></div></div>
+  <div id="boot-status">Loading player…</div>
+  <div id="boot-note">First load downloads the full hotel client (&asymp;100&nbsp;MB) — keep the screen on.</div>
+</div>
+
+<!-- Production: route the Multiuser xtra's official endpoints through the
+     same-origin ws->TCP bridge. socket-proxy.js derives ws(s)://<page-host>/ws/info
+     and /ws/mus from location at runtime; the polyfill installs
+     window.dirplayerResolveSocketUrl which reads this config on every call.
+     site-urls.js rewrites the embed's sw4/sw5 site/reload URLs to the page
+     origin (https stays https) before the polyfill reads them.
+     (VERBATIM MIRROR OF index_m2.html - owned by the connectivity engineer.) -->
+<script src="/config.js"></script>
+<script src="/socket-proxy.js"></script>
+<script src="/site-urls.js"></script>
+<script src="/dirplayer-polyfill.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var STAGE_W = 960, STAGE_H = 540; // logical Director stage (mirror of index_m2)
+  var cfg = window.__habboIosShell;
+  var debug = window.__habboIosDebug;
+  var $ = function (id) { return document.getElementById(id); };
+  var topbar = $('topbar'), netdot = $('netdot'), viewport = $('stage-viewport'),
+      frame = $('stage-frame'), kbInput = $('kb-input'), kbFab = $('kb-fab'),
+      kbTop = $('kb-top'), fsBtn = $('fs-btn'), toastEl = $('toast'),
+      overlay = $('boot-overlay'), bootFill = $('boot-fill'), bootStatus = $('boot-status');
+
+  /* ================= stage scaling ================= */
+  var S = { k: 1, left: 0, top: 0, baseLeft: 0, baseTop: 0, kbd: false };
+
+  function fit() {
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var th = topbar.getBoundingClientRect().height || 38;
+    var availW = vw, availH = Math.max(0, vh - th);
+    var k = Math.min(availW / STAGE_W, availH / STAGE_H);
+    if (!(k > 0)) k = 0.01;
+    var baseLeft = (availW - STAGE_W * k) / 2;
+    var baseTop = th + (availH - STAGE_H * k) / 2;
+    var left = baseLeft, top = baseTop;
+    var kbOverlap = 0;
+    if (S.kbd && window.visualViewport) {
+      // Software keyboard is up: keep the stage scale, but slide it so its
+      // bottom edge (the Habbo chat bar lives there) sits just above the
+      // keyboard's visible region instead of being covered by it.
+      var vv = window.visualViewport;
+      var visBottom = vv.offsetTop + vv.height; // client-coord bottom of the visible area
+      var stageH = STAGE_H * k;
+      var topKbd = visBottom - stageH - 6;
+      top = Math.min(baseTop, topKbd);
+      top = Math.max(top, -stageH + 48); // never leave less than 48px of stage onscreen
+      kbOverlap = Math.max(0, vh - visBottom);
+    }
+    S.k = k; S.left = left; S.top = top; S.baseLeft = baseLeft; S.baseTop = baseTop;
+    frame.style.transform = 'translate3d(' + left + 'px,' + top + 'px,0) scale(' + k + ')';
+    // keep the floating keyboard button reachable above the open keyboard
+    kbFab.style.bottom = kbOverlap > 0
+      ? 'calc(' + (12 + kbOverlap) + 'px + var(--safe-b))'
+      : '';
+  }
+
+  var fitQueued = false;
+  function scheduleFit() {
+    if (fitQueued) return;
+    fitQueued = true;
+    requestAnimationFrame(function () { fitQueued = false; fit(); });
+  }
+  window.addEventListener('resize', scheduleFit);
+  window.addEventListener('orientationchange', function () {
+    scheduleFit();
+    setTimeout(fit, 250); // iOS reports final dims late after rotation
+    setTimeout(fit, 600);
+  });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', scheduleFit);
+    window.visualViewport.addEventListener('scroll', scheduleFit);
+  }
+
+  /* ---------- pointer coordinate rewriter ----------
+     The polyfill maps pointer client coords -> canvas coords assuming an
+     untransformed stage (container == stage). Our fit uses a CSS transform,
+     so getBoundingClientRect() is scaled while the polyfill's math is not.
+     Fix at the source: rewrite clientX/clientY (capture phase, before the
+     polyfill's React root listener reads them) back into stage space. */
+  function rewritePoint(e) {
+    if (typeof e.clientX !== 'number') return;
+    var k = S.k;
+    if (!(k > 0)) return;
+    var nx = S.left + (e.clientX - S.left) / k;
+    var ny = S.top + (e.clientY - S.top) / k;
+    try {
+      Object.defineProperty(e, 'clientX', { value: nx, configurable: true });
+      Object.defineProperty(e, 'clientY', { value: ny, configurable: true });
+      Object.defineProperty(e, 'pageX', { value: nx + (window.scrollX || 0), configurable: true });
+      Object.defineProperty(e, 'pageY', { value: ny + (window.scrollY || 0), configurable: true });
+      Object.defineProperty(e, 'x', { value: nx, configurable: true });
+      Object.defineProperty(e, 'y', { value: ny, configurable: true });
+    } catch (err) { /* non-configurable event impl — pointer math will be off, non-fatal */ }
+  }
+  ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'click']
+    .forEach(function (t) { frame.addEventListener(t, rewritePoint, true); });
+
+  /* ================= chat keyboard bridge ================= */
+  var SPECIALS = ['Enter', 'Backspace', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft',
+                  'ArrowRight', 'Escape', 'Delete', 'Home', 'End'];
+  var lastBkspDown = 0, composing = false;
+
+  kbInput.addEventListener('keydown', function (e) {
+    var key = e.key;
+    if (key === 'Unidentified') return; // beforeinput/input will carry the data
+    if (key === 'Shift' || key === 'Control' || key === 'Meta' || key === 'Alt' || key === 'AltGraph') {
+      window.__habboKey('down', key, e.keyCode, 'kb');
+      return;
+    }
+    if (SPECIALS.indexOf(key) !== -1) {
+      e.preventDefault();
+      if (key === 'Backspace') lastBkspDown = Date.now();
+      window.__habboKey('down', key, e.keyCode, 'kb');
+      if (key === 'Enter' && !cfg.keepKeyboardOnEnter) {
+        setTimeout(function () { kbInput.blur(); }, 60); // let keyup fire first
+      }
+    }
+    // printable characters flow through beforeinput -> input (mirrors the
+    // polyfill's own hidden-input path in src/views/Stage/index.tsx)
+  });
+  kbInput.addEventListener('keyup', function (e) {
+    if (e.key === 'Unidentified') return;
+    window.__habboKey('up', e.key, e.keyCode, 'kb');
+  });
+  kbInput.addEventListener('beforeinput', function (e) {
+    var t = e.inputType || '';
+    if (t.indexOf('delete') === 0) {
+      e.preventDefault(); // field stays empty; the VM already has the key
+      if (Date.now() - lastBkspDown > 60) {
+        // keyboard sent deletion without a keydown (some third-party IMEs)
+        window.__habboKey('down', 'Backspace', 8, 'kb-beforeinput');
+        setTimeout(function () { window.__habboKey('up', 'Backspace', 8, 'kb-beforeinput'); }, 30);
+      }
+    } else if (t === 'insertFromPaste') {
+      e.preventDefault(); // handled by the paste listener below
+    }
+  });
+  kbInput.addEventListener('input', function () {
+    if (composing) return;
+    var v = kbInput.value;
+    if (!v) return;
+    var chars = v.split('');
+    kbInput.value = '';
+    var ups = [];
+    chars.forEach(function (ch) {
+      if (ch === '\r' || ch === '\n') {
+        window.__habboKey('down', 'Enter', 13, 'kb-text');
+        ups.push(['Enter', 13]);
+      } else {
+        var code = window.__habboKeyCodeFor(ch);
+        window.__habboKey('down', ch, code, 'kb-text');
+        ups.push([ch, code]);
+      }
+    });
+    // Defer key_up so the VM's async keyDown handler can still read keyboard
+    // state (the polyfill does exactly this in its own input handler).
+    setTimeout(function () {
+      ups.forEach(function (u) { window.__habboKey('up', u[0], u[1], 'kb-text'); });
+    }, 90);
+  });
+  kbInput.addEventListener('compositionstart', function () {
+    composing = true;
+    try { if (window.__vm && window.__vm.ime_composition_start) window.__vm.ime_composition_start(); } catch (e) {}
+  });
+  kbInput.addEventListener('compositionupdate', function (e) {
+    try { if (window.__vm && window.__vm.ime_composition_update) window.__vm.ime_composition_update(e.data || ''); } catch (err) {}
+  });
+  kbInput.addEventListener('compositionend', function (e) {
+    composing = false;
+    try { if (window.__vm && window.__vm.ime_composition_end) window.__vm.ime_composition_end(e.data || ''); } catch (err) {}
+    kbInput.value = '';
+  });
+  kbInput.addEventListener('paste', function (e) {
+    e.preventDefault();
+    var text = '';
+    try { text = (e.clipboardData || window.clipboardData).getData('text') || ''; } catch (err) {}
+    if (!text) return;
+    var vm = window.__vm;
+    if (vm && typeof vm.is_field_focused === 'function' && typeof vm.paste_text_into_focused_field === 'function') {
+      try {
+        if (vm.is_field_focused()) { vm.paste_text_into_focused_field(text); return; }
+      } catch (err) {}
+    }
+    text.slice(0, 2000).split('').forEach(function (ch, i) {
+      setTimeout(function () {
+        var code = window.__habboKeyCodeFor(ch);
+        window.__habboKey('down', ch, code, 'kb-paste');
+        setTimeout(function () { window.__habboKey('up', ch, code, 'kb-paste'); }, 40);
+      }, i * 8);
+    });
+  });
+
+  // focus tracking: the keyboard counts as "open" when either our input or
+  // the polyfill's own hidden field-input (focused when a Director text
+  // field sprite is tapped) holds focus.
+  function isKbTarget(el) {
+    if (el === kbInput) return true;
+    return !!(el && el.tagName === 'INPUT' && frame.contains(el));
+  }
+  function kbOpen() { return isKbTarget(document.activeElement); }
+  function setKbdUi(on) {
+    document.body.classList.toggle('kbd-open', on);
+    kbFab.classList.toggle('on', on);
+    kbTop.classList.toggle('on', on);
+  }
+  function focusKb() {
+    try { kbInput.focus({ preventScroll: true }); }
+    catch (e) { try { kbInput.focus(); } catch (e2) {} }
+  }
+  function toggleKeyboard() {
+    if (kbOpen()) { document.activeElement.blur(); return; }
+    focusKb();
+  }
+  // Browsers that focus buttons on tap (Chromium; NOT iOS Safari) blur the
+  // chat input on pointerdown — before the click fires — which would make a
+  // plain click-time toggle see "closed" and re-open. Capture the pre-tap
+  // state on pointerdown so both behaviors converge on a working toggle.
+  var preTapKbOpen = null;
+  function bindKbToggle(btn) {
+    btn.addEventListener('pointerdown', function () { preTapKbOpen = kbOpen(); });
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      var open = (preTapKbOpen !== null) ? preTapKbOpen : kbOpen();
+      preTapKbOpen = null;
+      if (open) {
+        var ae = document.activeElement;      // may already be blurred (Chromium)
+        if (ae && isKbTarget(ae)) ae.blur();
+      } else {
+        focusKb();
+      }
+    });
+  }
+  bindKbToggle(kbFab);
+  bindKbToggle(kbTop);
+  document.addEventListener('focusin', function (e) {
+    if (isKbTarget(e.target)) { S.kbd = true; setKbdUi(true); scheduleFit(); }
+  });
+  document.addEventListener('focusout', function (e) {
+    if (isKbTarget(e.target)) {
+      S.kbd = false; setKbdUi(false);
+      setTimeout(fit, 60);   // keyboard slides away -> restore centered fit
+      setTimeout(fit, 400);
+    }
+  });
+
+  /* ================= boot progress overlay ================= */
+  var boot = { pct: 0, done: false, casts: 0, vmReady: false, canvasSeen: false };
+  function setBoot(pct, status) {
+    if (boot.done) return;
+    boot.pct = Math.max(boot.pct, Math.min(100, pct));
+    bootFill.style.width = boot.pct + '%';
+    if (status) bootStatus.textContent = status;
+  }
+  function completeBoot() {
+    if (boot.done) return;
+    boot.done = true;
+    bootFill.style.width = '100%';
+    bootStatus.textContent = 'Welcome to Habbo';
+    setTimeout(function () {
+      overlay.classList.add('done');
+      setTimeout(function () { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }, 750);
+    }, 350);
+    try { window.dispatchEvent(new CustomEvent('habbo:booted')); } catch (e) {}
+  }
+  window.__habboBoot.onLine(function (text) {
+    if (cfg.debug) {
+      debug.bootLog.push(text.slice(0, 160));
+      if (debug.bootLog.length > 80) debug.bootLog.splice(0, debug.bootLog.length - 80);
+    }
+    if (boot.done) return;
+    if (text.indexOf('VM initialized') !== -1) {
+      boot.vmReady = true;
+      setBoot(20, 'Player runtime ready');
+    } else if (text.indexOf('AudioContext created') !== -1) {
+      setBoot(10, 'Starting audio engine…');
+    } else if (text.indexOf('Loading cast http') !== -1) {
+      boot.casts++;
+      var n = Math.min(boot.casts, cfg.expectedCastCount);
+      setBoot(20 + Math.min(boot.casts / cfg.expectedCastCount, 1) * 65,
+              'Downloading hotel data (' + n + '/' + cfg.expectedCastCount + ')…');
+    } else if (text.indexOf('showHotel') !== -1 ||
+               text.indexOf('login_b_login_ok') !== -1 ||
+               text.indexOf('login_a_login_a_title') !== -1) {
+      completeBoot(); // entry screen is on stage (markers from the client's own logs)
+    }
+  });
+  if (window.DirPlayer) setBoot(6, 'Player loaded');
+  var mo = new MutationObserver(function () {
+    if (!boot.canvasSeen && frame.querySelector('canvas')) {
+      boot.canvasSeen = true;
+      // Canvas appears EARLY in the boot (well before the ~58 casts finish
+      // downloading) — only jump near-complete when downloads are nearly done,
+      // otherwise just update the label and let the cast counter drive.
+      if (boot.casts >= cfg.expectedCastCount * 0.8 || boot.pct >= 75) {
+        setBoot(86, 'Building the hotel…');
+      } else {
+        setBoot(boot.pct + 2, 'Building the hotel…');
+      }
+    }
+  });
+  mo.observe(frame, { childList: true, subtree: true });
+  var creepTimer = setInterval(function () {
+    if (boot.done) { clearInterval(creepTimer); return; }
+    setBoot(boot.pct + (92 - boot.pct) * 0.004); // gentle asymptotic creep
+    // Stall fallback: VM up, most casts in, console silent 25 s ⇒ client is parked.
+    if (boot.vmReady && boot.casts >= 40 && Date.now() - window.__habboBoot.lastLineAt > 25000) {
+      completeBoot();
+    }
+  }, 500);
+  overlay.addEventListener('click', function () {
+    if (boot.canvasSeen && boot.pct >= 80) completeBoot(); // manual escape hatch
+  });
+
+  /* ================= wake lock ================= */
+  var wakeLock = null;
+  function requestWakeLock() {
+    if (!('wakeLock' in navigator) || wakeLock) return;
+    navigator.wakeLock.request('screen').then(function (wl) {
+      wakeLock = wl;
+      wl.addEventListener('release', function () { wakeLock = null; });
+    }).catch(function () { /* unsupported / denied — cosmetic feature */ });
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') requestWakeLock();
+  });
+  document.addEventListener('pointerdown', requestWakeLock, { once: true, capture: true });
+
+  /* ================= audio unlock (defensive; complements the polyfill) ==== */
+  function unlockAudio() {
+    try {
+      var ctx = window.getAudioContext && window.getAudioContext();
+      if (ctx && ctx.state === 'suspended') ctx.resume().catch(function () {});
+    } catch (e) {}
+  }
+  ['pointerdown', 'touchstart', 'keydown', 'click'].forEach(function (t) {
+    document.addEventListener(t, unlockAudio, { capture: true, passive: true });
+  });
+
+  /* ================= touch hygiene ================= */
+  document.addEventListener('touchmove', function (e) {
+    if (!(e.target && e.target.closest && e.target.closest('.allow-touch'))) e.preventDefault();
+  }, { passive: false });
+  document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
+  document.addEventListener('gesturechange', function (e) { e.preventDefault(); });
+  document.addEventListener('dblclick', function (e) {
+    if (viewport.contains(e.target)) e.preventDefault();
+  });
+  document.addEventListener('contextmenu', function (e) {
+    if (!(e.target && e.target.closest && e.target.closest('input, textarea'))) e.preventDefault();
+  });
+
+  /* ================= chrome: fullscreen, toast, net dot ================= */
+  var toastTimer = null;
+  function showToast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 3000);
+  }
+  fsBtn.addEventListener('click', function () {
+    if (document.fullscreenElement) { document.exitFullscreen().catch(function () {}); return; }
+    var el = document.documentElement;
+    var req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) {
+      try {
+        var p = req.call(el);
+        if (p && p.catch) p.catch(function () { showToast('Fullscreen not available — Add to Home Screen for chromeless play'); });
+      } catch (e) {
+        showToast('Fullscreen not available — Add to Home Screen for chromeless play');
+      }
+    } else {
+      showToast('On iPhone: Share → Add to Home Screen for fullscreen');
+    }
+  });
+
+  var NETMAP = {
+    idle: ['warn', ''], connecting: ['warn', 'pulse'], online: ['ok', ''],
+    offline: ['err', ''], error: ['err', '']
+  };
+  function renderNet(state) {
+    var m = NETMAP[state] || NETMAP.idle;
+    netdot.className = m[0] + (m[1] ? ' ' + m[1] : '');
+    netdot.title = 'Connection: ' + state;
+  }
+  window.addEventListener('habbo:netstate', function (e) { renderNet(e.detail.state); });
+  renderNet(window.__habboNet.state);
+
+  /* ================= debug surface (also used by the headless test driver) = */
+  debug.fit = function () {
+    return {
+      k: S.k, left: S.left, top: S.top,
+      baseLeft: S.baseLeft, baseTop: S.baseTop, kbd: S.kbd,
+      vw: window.innerWidth, vh: window.innerHeight,
+      vv: window.visualViewport ? { w: window.visualViewport.width, h: window.visualViewport.height, ot: window.visualViewport.offsetTop } : null
+    };
+  };
+  debug.boot = boot;
+  debug.toggleKeyboard = toggleKeyboard;
+  debug.completeBoot = completeBoot;
+
+  fit();
+})();
+</script>
+</body>
+</html>
